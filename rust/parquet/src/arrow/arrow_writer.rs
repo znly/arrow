@@ -304,13 +304,7 @@ mod tests {
         let a = Int32Array::from(vec![1, 2, 3, 4, 5]);
         let b = Int32Array::from(vec![Some(1), None, None, Some(4), Some(5)]);
         let d = Float64Array::from(vec![None, None, None, Some(1.0), None]);
-        let f = Float32Array::from(vec![
-            Some(0.0),
-            None,
-            Some(333.3),
-            None,
-            Some(5.25),
-        ]);
+        let f = Float32Array::from(vec![Some(0.0), None, Some(333.3), None, Some(5.25)]);
 
         let g_value = BooleanArray::from(vec![
             false, true, false, true, false, true, false, true, false, true,
