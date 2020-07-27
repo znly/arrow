@@ -33,9 +33,9 @@ use crate::{
     file::writer::{FileWriter, RowGroupWriter, SerializedFileWriter},
 };
 
-struct ArrowWriter {
+pub struct ArrowWriter {
     writer: SerializedFileWriter<File>,
-    rows: i64,
+    num_columns: i64,
 }
 
 impl ArrowWriter {
@@ -50,13 +50,13 @@ impl ArrowWriter {
 
         Ok(Self {
             writer: file_writer,
-            rows: 0,
+            num_columns: 0,
         })
     }
 
     pub fn write(&mut self, batch: &RecordBatch) -> Result<()> {
         let mut row_group_writer = self.writer.next_row_group()?;
-        self.rows += unnest_arrays_to_leaves(
+        self.num_columns += unnest_arrays_to_leaves(
             &mut row_group_writer,
             batch.schema().fields(),
             batch.columns(),
@@ -86,10 +86,17 @@ fn unnest_arrays_to_leaves(
     // The current level that is being read at
     level: i16,
 ) -> Result<i64> {
-    let mut rows_written = 0;
+    let mut columns_written = 0;
     for (field, column) in fields.iter().zip(columns) {
         match field.data_type() {
             ArrowDataType::List(_dtype) => unimplemented!("list not yet implemented"),
+            ArrowDataType::LargeBinary => {
+                unimplemented!("large binary not yet implemented")
+            }
+            ArrowDataType::LargeUtf8 => unimplemented!("large utf8 not yet implemented"),
+            ArrowDataType::LargeList(_) => {
+                unimplemented!("large lilst not yet implemented")
+            }
             ArrowDataType::FixedSizeList(_, _) => {
                 unimplemented!("fsl not yet implemented")
             }
@@ -103,7 +110,7 @@ fn unnest_arrays_to_leaves(
                 for i in 0..array.len() {
                     null_mask.push(array.is_valid(i) as i16);
                 }
-                rows_written += unnest_arrays_to_leaves(
+                columns_written += unnest_arrays_to_leaves(
                     row_group_writer,
                     fields,
                     &array.columns_ref()[..],
@@ -138,7 +145,7 @@ fn unnest_arrays_to_leaves(
                 let col_writer = row_group_writer.next_column()?;
                 if let Some(mut writer) = col_writer {
                     // write_column
-                    rows_written +=
+                    columns_written +=
                         write_column(&mut writer, column, level, parent_mask)? as i64;
                     row_group_writer.close_column(writer)?;
                 } else {
@@ -149,7 +156,7 @@ fn unnest_arrays_to_leaves(
             ArrowDataType::Dictionary(_, _) => unimplemented!(),
         }
     }
-    Ok(rows_written)
+    Ok(columns_written)
 }
 
 /// Write column to writer
@@ -194,7 +201,22 @@ fn write_column(
                 None,
             )
         }
-        ColumnWriter::ByteArrayColumnWriter(ref mut _typed) => unimplemented!(),
+        ColumnWriter::ByteArrayColumnWriter(ref mut typed) => {
+            let array = array::BinaryArray::from(column.data());
+
+            let mut values: Vec<ByteArray> =
+                Vec::with_capacity(array.len() - array.null_count());
+            for i in 0..array.len() {
+                if array.is_valid(i) {
+                    values.push(ByteArray::from(array.value(i).to_vec()))
+                }
+            }
+            typed.write_batch(
+                values.as_slice(),
+                Some(get_primitive_def_levels(column, level, parent_levels).as_slice()),
+                None,
+            )
+        }
         ColumnWriter::FixedLenByteArrayColumnWriter(ref mut _typed) => unimplemented!(),
     }
 }
@@ -225,6 +247,24 @@ fn get_primitive_def_levels(
 /// If there are no null values, the entire slice is returned,
 /// thus this should only be called when there are null values.
 fn get_numeric_array_slice<T, A>(array: &array::PrimitiveArray<A>) -> Vec<T::T>
+where
+    T: DataType,
+    A: arrow::datatypes::ArrowNumericType,
+    T::T: From<A::Native>,
+{
+    let mut values = Vec::with_capacity(array.len() - array.null_count());
+    for i in 0..array.len() {
+        if array.is_valid(i) {
+            values.push(array.value(i).into())
+        }
+    }
+    values
+}
+
+/// Get the underlying numeric array slice, skipping any null values.
+/// If there are no null values, the entire slice is returned,
+/// thus this should only be called when there are null values.
+fn get_list_array_slice<T, A>(array: &array::PrimitiveArray<A>) -> Vec<T::T>
 where
     T: DataType,
     A: arrow::datatypes::ArrowNumericType,
