@@ -26,16 +26,18 @@
 
 namespace arrow {
 namespace compute {
+namespace internal {
 
 void ExecFail(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
   ctx->SetStatus(Status::NotImplemented("This kernel is malformed"));
 }
 
-void BinaryExecFlipped(KernelContext* ctx, ArrayKernelExec exec, const ExecBatch& batch,
-                       Datum* out) {
-  ExecBatch flipped_batch = batch;
-  std::swap(flipped_batch.values[0], flipped_batch.values[1]);
-  exec(ctx, flipped_batch, out);
+ArrayKernelExec MakeFlippedBinaryExec(ArrayKernelExec exec) {
+  return [exec](KernelContext* ctx, const ExecBatch& batch, Datum* out) {
+    ExecBatch flipped_batch = batch;
+    std::swap(flipped_batch.values[0], flipped_batch.values[1]);
+    exec(ctx, flipped_batch, out);
+  };
 }
 
 std::vector<std::shared_ptr<DataType>> g_signed_int_types;
@@ -130,6 +132,12 @@ const std::vector<std::shared_ptr<DataType>>& FloatingPointTypes() {
   return g_floating_types;
 }
 
+const std::vector<TimeUnit::type>& AllTimeUnits() {
+  static std::vector<TimeUnit::type> units = {TimeUnit::SECOND, TimeUnit::MILLI,
+                                              TimeUnit::MICRO, TimeUnit::NANO};
+  return units;
+}
+
 const std::vector<std::shared_ptr<DataType>>& NumericTypes() {
   std::call_once(codegen_static_initialized, InitStaticData);
   return g_numeric_types;
@@ -171,5 +179,6 @@ Result<ValueDescr> FirstType(KernelContext*, const std::vector<ValueDescr>& desc
   return descrs[0];
 }
 
+}  // namespace internal
 }  // namespace compute
 }  // namespace arrow

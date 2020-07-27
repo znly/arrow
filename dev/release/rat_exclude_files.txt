@@ -7,8 +7,10 @@
 *.csv
 *.json
 *.snap
-.github/ISSUE_TEMPLATE.md
+.github/ISSUE_TEMPLATE/question.md
 ci/etc/rprofile
+ci/etc/*.patch
+CHANGELOG.md
 cpp/CHANGELOG_PARQUET.md
 cpp/src/arrow/io/mman.h
 cpp/src/arrow/util/random.h
@@ -40,6 +42,7 @@ cpp/src/plasma/thirdparty/dlmalloc.c
 cpp/thirdparty/flatbuffers/include/flatbuffers/base.h
 cpp/thirdparty/flatbuffers/include/flatbuffers/flatbuffers.h
 cpp/thirdparty/flatbuffers/include/flatbuffers/stl_emulation.h
+dev/archery/MANIFEST.in
 dev/archery/requirements*.txt
 dev/archery/archery/tests/fixtures/*
 dev/release/rat_exclude_files.txt
@@ -244,6 +247,7 @@ r/README.Rmd
 r/man/*.Rd
 r/cran-comments.md
 r/vignettes/*.Rmd
+r/tests/testthat/test-*.txt
 .gitattributes
 ruby/red-arrow/.yardopts
 rust/arrow/test/data/*.csv

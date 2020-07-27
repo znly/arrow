@@ -93,8 +93,7 @@ class ConcatenateTest : public ::testing::Test {
         factory(size, null_probability, &array);
         auto expected = array->Slice(offsets.front(), offsets.back() - offsets.front());
         auto slices = this->Slices(array, offsets);
-        std::shared_ptr<Array> actual;
-        ASSERT_OK(Concatenate(slices, default_memory_pool(), &actual));
+        ASSERT_OK_AND_ASSIGN(auto actual, Concatenate(slices));
         AssertArraysEqual(*expected, *actual);
         if (actual->data()->buffers[0]) {
           CheckTrailingBitsAreZeroed(actual->data()->buffers[0], actual->length());
@@ -125,8 +124,7 @@ TEST(ConcatenateEmptyArraysTest, TestValueBuffersNullPtr) {
   ASSERT_OK(builder.Finish(&binary_array));
   inputs.push_back(std::move(binary_array));
 
-  std::shared_ptr<Array> actual;
-  ASSERT_OK(Concatenate(inputs, default_memory_pool(), &actual));
+  ASSERT_OK_AND_ASSIGN(auto actual, Concatenate(inputs));
   AssertArraysEqual(*actual, *inputs[1]);
 }
 
@@ -143,6 +141,12 @@ TYPED_TEST_SUITE(PrimitiveConcatenateTest, PrimitiveTypes);
 TYPED_TEST(PrimitiveConcatenateTest, Primitives) {
   this->Check([this](int64_t size, double null_probability, std::shared_ptr<Array>* out) {
     *out = this->template GeneratePrimitive<TypeParam>(size, null_probability);
+  });
+}
+
+TEST_F(ConcatenateTest, NullType) {
+  Check([](int32_t size, double null_probability, std::shared_ptr<Array>* out) {
+    *out = std::make_shared<NullArray>(size);
   });
 }
 
@@ -239,8 +243,7 @@ TEST_F(ConcatenateTest, OffsetOverflow) {
   std::shared_ptr<Array> concatenated;
   // XX since the data fake_long claims to own isn't there, this will segfault if
   // Concatenate doesn't detect overflow and raise an error.
-  ASSERT_RAISES(
-      Invalid, Concatenate({fake_long, fake_long}, default_memory_pool(), &concatenated));
+  ASSERT_RAISES(Invalid, Concatenate({fake_long, fake_long}).status());
 }
 
 }  // namespace arrow
