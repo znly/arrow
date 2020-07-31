@@ -69,31 +69,105 @@ impl ArrowWriter {
 
     pub fn write(&mut self, batch: &RecordBatch) -> Result<()> {
         let mut row_group_writer = self.writer.next_row_group()?;
-
-        for (column_descriptor, column) in self.columns.iter().zip(batch.columns()) {
-            let mut writer = row_group_writer
-                .next_column()?
-                .ok_or_else(|| ParquetError::General("No writer found".to_string()))?;
-            self.total_num_rows += write_column(
-                &mut writer,
-                column,
-                column_descriptor
-                    .def_levels
-                    .as_ref()
-                    .map(|lvls| lvls.as_slice()),
-                column_descriptor
-                    .rep_levels
-                    .as_ref()
-                    .map(|lvls| lvls.as_slice()),
-            )? as i64;
-            row_group_writer.close_column(writer)?;
-        }
+        self.total_num_rows += unnest_arrays_to_leaves(
+            &mut row_group_writer,
+            batch.schema().fields(),
+            batch.columns(),
+            &vec![1i16; batch.num_rows()][..],
+            0,
+        )?;
         self.writer.close_row_group(row_group_writer)
     }
 
     pub fn close(&mut self) -> Result<()> {
         self.writer.close()
     }
+}
+
+/// Write nested arrays by traversing into structs and lists until primitive
+/// arrays are found.
+fn unnest_arrays_to_leaves(
+    row_group_writer: &mut Box<dyn RowGroupWriter>,
+    // The fields from the record batch or struct
+    fields: &Vec<Field>,
+    // The columns from record batch or struct, must have same length as fields
+    columns: &[array::ArrayRef],
+    // The parent mask, in the case of a struct, this represents which values
+    // of the struct are true (1) or false(0).
+    // This is useful to respect the definition level of structs where all values are null in a row
+    parent_mask: &[i16],
+    // The current level that is being read at
+    level: i16,
+) -> Result<i64> {
+    let mut rows_written = 0;
+    for (field, column) in fields.iter().zip(columns) {
+        match field.data_type() {
+            ArrowDataType::List(_dtype) => unimplemented!("list not yet implemented"),
+            ArrowDataType::FixedSizeList(_, _) => {
+                unimplemented!("fsl not yet implemented")
+            }
+            ArrowDataType::LargeBinary => {
+                unimplemented!("large binary not yet implemented")
+            }
+            ArrowDataType::LargeUtf8 => unimplemented!("large utf8 not yet implemented"),
+            ArrowDataType::LargeList(_) => {
+                unimplemented!("large lilst not yet implemented")
+            }
+            ArrowDataType::Struct(fields) => {
+                // fields in a struct should recursively be written out
+                let array = column
+                    .as_any()
+                    .downcast_ref::<array::StructArray>()
+                    .expect("Unable to get struct array");
+                let mut null_mask = Vec::with_capacity(array.len());
+                for i in 0..array.len() {
+                    null_mask.push(array.is_valid(i) as i16);
+                }
+                rows_written += unnest_arrays_to_leaves(
+                    row_group_writer,
+                    fields,
+                    &array.columns_ref()[..],
+                    &null_mask[..],
+                    // if the field is nullable, we have to increment level
+                    level + field.is_nullable() as i16,
+                )?;
+            }
+            ArrowDataType::Null => unimplemented!(),
+            ArrowDataType::Boolean
+            | ArrowDataType::Int8
+            | ArrowDataType::Int16
+            | ArrowDataType::Int32
+            | ArrowDataType::Int64
+            | ArrowDataType::UInt8
+            | ArrowDataType::UInt16
+            | ArrowDataType::UInt32
+            | ArrowDataType::UInt64
+            | ArrowDataType::Float16
+            | ArrowDataType::Float32
+            | ArrowDataType::Float64
+            | ArrowDataType::Timestamp(_, _)
+            | ArrowDataType::Date32(_)
+            | ArrowDataType::Date64(_)
+            | ArrowDataType::Time32(_)
+            | ArrowDataType::Time64(_)
+            | ArrowDataType::Duration(_)
+            | ArrowDataType::Interval(_)
+            | ArrowDataType::Binary
+            | ArrowDataType::FixedSizeBinary(_)
+            | ArrowDataType::Utf8 => {
+                let mut writer = row_group_writer.next_column()?.ok_or_else(|| {
+                    ParquetError::General("No writer found".to_string())
+                })?;
+                // write_column
+                rows_written +=
+                    write_column(&mut writer, column, level, parent_mask)? as i64;
+                row_group_writer.close_column(writer)?;
+            }
+            ArrowDataType::Union(_) => unimplemented!(),
+            ArrowDataType::Dictionary(_, _) => unimplemented!(),
+        }
+    }
+    Ok(rows_written)
 }
 
 fn flattened_column_types(
@@ -159,16 +233,16 @@ fn flattened_column_types(
 fn write_column(
     writer: &mut ColumnWriter,
     column: &array::ArrayRef,
-    def_levels: Option<&[i16]>,
-    rep_levels: Option<&[i16]>,
+    level: i16,
+    parent_levels: &[i16],
 ) -> Result<usize> {
     match writer {
         ColumnWriter::Int32ColumnWriter(ref mut typed) => {
             let array = array::Int32Array::from(column.data());
             typed.write_batch(
                 get_numeric_array_slice::<Int32Type, _>(&array).as_slice(),
-                def_levels,
-                rep_levels,
+                Some(get_primitive_def_levels(column, level, parent_levels).as_slice()),
+                None,
             )
         }
         ColumnWriter::BoolColumnWriter(ref mut _typed) => unimplemented!(),
@@ -176,8 +250,8 @@ fn write_column(
             let array = array::Int64Array::from(column.data());
             typed.write_batch(
                 get_numeric_array_slice::<Int64Type, _>(&array).as_slice(),
-                def_levels,
-                rep_levels,
+                Some(get_primitive_def_levels(column, level, parent_levels).as_slice()),
+                None,
             )
         }
         ColumnWriter::Int96ColumnWriter(ref mut _typed) => unimplemented!(),
@@ -185,16 +259,16 @@ fn write_column(
             let array = array::Float32Array::from(column.data());
             typed.write_batch(
                 get_numeric_array_slice::<FloatType, _>(&array).as_slice(),
-                def_levels,
-                rep_levels,
+                Some(get_primitive_def_levels(column, level, parent_levels).as_slice()),
+                None,
             )
         }
         ColumnWriter::DoubleColumnWriter(ref mut typed) => {
             let array = array::Float64Array::from(column.data());
             typed.write_batch(
                 get_numeric_array_slice::<DoubleType, _>(&array).as_slice(),
-                def_levels,
-                rep_levels,
+                Some(get_primitive_def_levels(column, level, parent_levels).as_slice()),
+                None,
             )
         }
         ColumnWriter::ByteArrayColumnWriter(ref mut typed) => {
@@ -207,7 +281,11 @@ fn write_column(
                     values.push(ByteArray::from(array.value(i).to_vec()))
                 }
             }
-            typed.write_batch(values.as_slice(), def_levels, rep_levels)
+            typed.write_batch(
+                values.as_slice(),
+                Some(get_primitive_def_levels(column, level, parent_levels).as_slice()),
+                None,
+            )
         }
         ColumnWriter::FixedLenByteArrayColumnWriter(ref mut _typed) => unimplemented!(),
     }
