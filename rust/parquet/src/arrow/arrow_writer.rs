@@ -26,7 +26,7 @@ use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
 use crate::column::writer::ColumnWriter;
-use crate::errors::Result;
+use crate::errors::{ParquetError, Result};
 use crate::file::properties::WriterProperties;
 use crate::{
     data_type::*,
@@ -71,24 +71,22 @@ impl ArrowWriter {
         let mut row_group_writer = self.writer.next_row_group()?;
 
         for (column_descriptor, column) in self.columns.iter().zip(batch.columns()) {
-            let col_writer = row_group_writer.next_column()?;
-            if let Some(mut writer) = col_writer {
-                self.total_num_rows += write_column(
-                    &mut writer,
-                    column,
-                    column_descriptor
-                        .def_levels
-                        .as_ref()
-                        .map(|lvls| lvls.as_slice()),
-                    column_descriptor
-                        .rep_levels
-                        .as_ref()
-                        .map(|lvls| lvls.as_slice()),
-                )? as i64;
-                row_group_writer.close_column(writer)?;
-            } else {
-                panic!("No writer found")
-            }
+            let mut writer = row_group_writer
+                .next_column()?
+                .ok_or_else(|| ParquetError::General("No writer found".to_string()))?;
+            self.total_num_rows += write_column(
+                &mut writer,
+                column,
+                column_descriptor
+                    .def_levels
+                    .as_ref()
+                    .map(|lvls| lvls.as_slice()),
+                column_descriptor
+                    .rep_levels
+                    .as_ref()
+                    .map(|lvls| lvls.as_slice()),
+            )? as i64;
+            row_group_writer.close_column(writer)?;
         }
         self.writer.close_row_group(row_group_writer)
     }
