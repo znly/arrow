@@ -37,6 +37,7 @@ use crate::{
 pub struct ArrowWriter {
     writer: SerializedFileWriter<File>,
     columns: Vec<DataTypeWithDefAndRepLevel>,
+    total_num_rows: i64,
 }
 #[derive(Debug)]
 struct DataTypeWithDefAndRepLevel {
@@ -57,22 +58,32 @@ impl ArrowWriter {
 
         Ok(Self {
             writer: file_writer,
-            columns: flattened_column_types(arrow_schema.fields(), 0)?,
+            columns: flattened_column_types(
+                arrow_schema.fields(),
+                Vec::new().as_mut(),
+                Vec::new().as_mut(),
+            )?,
+            total_num_rows: 0,
         })
     }
 
     pub fn write(&mut self, batch: &RecordBatch) -> Result<()> {
         let mut row_group_writer = self.writer.next_row_group()?;
 
-        let mut columns_written = 0;
         for (column_descriptor, column) in self.columns.iter().zip(batch.columns()) {
             let col_writer = row_group_writer.next_column()?;
             if let Some(mut writer) = col_writer {
-                columns_written += write_column(
+                self.total_num_rows += write_column(
                     &mut writer,
                     column,
-                    column_descriptor.def_levels.as_ref(),
-                    column_descriptor.rep_levels.as_ref(),
+                    column_descriptor
+                        .def_levels
+                        .as_ref()
+                        .map(|lvls| lvls.as_slice()),
+                    column_descriptor
+                        .rep_levels
+                        .as_ref()
+                        .map(|lvls| lvls.as_slice()),
                 )? as i64;
                 row_group_writer.close_column(writer)?;
             } else {
@@ -89,20 +100,19 @@ impl ArrowWriter {
 
 fn flattened_column_types(
     fields: &Vec<Field>,
-    current_level: i16,
+    current_def_levels: &mut Vec<i16>,
+    current_rep_levels: &mut Vec<i16>,
 ) -> Result<Vec<DataTypeWithDefAndRepLevel>> {
     let mut column_types = Vec::new();
-    let mut current_level_range = Vec::with_capacity(current_level as usize + 1);
-
-    for _ in 0i16..=current_level {
-        current_level_range.push(1);
-    }
-
     for field in fields.iter() {
         match field.data_type() {
             ArrowDataType::Struct(fields) => {
-                column_types
-                    .append(&mut flattened_column_types(fields, current_level + 1)?);
+                current_rep_levels.push(1);
+                column_types.append(&mut flattened_column_types(
+                    fields,
+                    current_def_levels,
+                    current_rep_levels,
+                )?);
             }
             ArrowDataType::List(_dtype) => unimplemented!("list not yet implemented"),
             ArrowDataType::LargeBinary => {
@@ -119,11 +129,27 @@ fn flattened_column_types(
             ArrowDataType::Union(_) => unimplemented!(),
             ArrowDataType::Dictionary(_, _) => unimplemented!(),
             data_type => {
+                let mut def_levels = if current_def_levels.len() > 0 {
+                    current_def_levels.clone()
+                } else {
+                    Vec::new()
+                };
+                if field.is_nullable() {
+                    def_levels.push(def_levels.last().unwrap_or(&0) + 1);
+                } else {
+                    def_levels.push(1);
+                }
+
+                let rep_levels = if current_rep_levels.len() > 0 {
+                    Some(current_rep_levels.clone())
+                } else {
+                    None
+                };
                 // TODO [igni]: remove the clone ?
                 column_types.push(DataTypeWithDefAndRepLevel {
                     data_type: data_type.clone(),
-                    def_levels: Some(current_level_range.clone()),
-                    rep_levels: Some(current_level_range.clone()),
+                    def_levels: def_levels.into(),
+                    rep_levels,
                 });
             }
         }
@@ -135,11 +161,9 @@ fn flattened_column_types(
 fn write_column(
     writer: &mut ColumnWriter,
     column: &array::ArrayRef,
-    def_levels: Option<&Vec<i16>>,
-    rep_levels: Option<&Vec<i16>>,
+    def_levels: Option<&[i16]>,
+    rep_levels: Option<&[i16]>,
 ) -> Result<usize> {
-    let def_levels = def_levels.map(|lvls| lvls.as_slice());
-    let rep_levels = rep_levels.map(|lvls| lvls.as_slice());
     match writer {
         ColumnWriter::Int32ColumnWriter(ref mut typed) => {
             let array = array::Int32Array::from(column.data());
